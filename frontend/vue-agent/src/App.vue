@@ -3,6 +3,7 @@
     <!-- 历史记录区域 -->
     <div class="chat-history" ref="chatHistoryRef">
       <div class="message-list">
+        <!-- 消息列表 -->
         <div
           v-for="(msg, index) in messages"
           :key="index"
@@ -10,7 +11,11 @@
         >
           <div class="message-bubble">
             <span class="message-label">{{ msg.role === 'user' ? '你' : 'AI' }}:</span>
-            <span class="message-text">{{ msg.text }}</span>
+            <div class="message-content">
+              <span v-if="msg.thinking" class="thinking-text">{{ msg.thinking }}</span>
+              <span v-else-if="isThinking && index === messages.length - 1" class="thinking-text">AI正在思考中...</span>
+              <span class="response-text">{{ msg.text }}</span>
+            </div>
           </div>
         </div>
       </div>
@@ -32,7 +37,7 @@
           :disabled="needsApproval"
           class="chat-input"
         />
-        <button @click="sendMessage('chat')" :disabled="needsApproval" class="send-btn">
+        <button @click="sendMessage('chat')" :disabled="needsApproval || isThinking" class="send-btn">
           发送
         </button>
       </div>
@@ -48,6 +53,8 @@ const userInput = ref('');
 const needsApproval = ref(false);
 const threadId = ref('user_123');
 const chatHistoryRef = ref(null);
+const isThinking = ref(false);
+let aiIndex;
 
 const sendMessage = async (action = 'chat') => {
   if (action === 'chat' && !userInput.value) return;
@@ -59,7 +66,11 @@ const sendMessage = async (action = 'chat') => {
     scrollToBottom();
   }
 
+  aiIndex = messages.value.push({ role: 'ai', text: '', thinking:'' }) - 1;
+  const targetMessage = messages.value[aiIndex];
+
   try {
+    isThinking.value = true
     const res = await fetch('http://localhost:8000/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -69,20 +80,63 @@ const sendMessage = async (action = 'chat') => {
       })
     });
 
-    const data = await res.json();
-    messages.value.push({ role: 'ai', text: data.agent_response });
-    needsApproval.value = data.tool_calls;
+    
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+
+    while(true){
+        const { done, value } = await reader.read();
+        if (done) break;
+    
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n\n').filter(line => line.trim() !== '');
+        for (const line of lines) {
+            if (line.startsWith('data: ')) {
+                const dataStr = line.replace('data: ', '').trim();
+                try {
+                    const data = JSON.parse(dataStr);
+                    if (data.type === 'thinking') {
+                        targetMessage.thinking += data.content;
+                        scrollToBottom();
+                    } 
+                    else if (data.type === 'text') {
+                        targetMessage.text += data.content;
+                        isThinking.value = false
+                        needsApproval.value = false;
+                    }
+                    else if (data.type === 'tool_calls') {
+                        isThinking.value = false;
+                        needsApproval.value = true;
+                    }
+                    else if (data.type === 'end') {
+                        isThinking.value = false
+                        needsApproval.value = false;
+                    }
+                } 
+                catch (e) {
+                    console.error("解析数据失败:", e);
+                }
+            }
+        }
+    }
+
+    // const data = await res.json();
+    // messages.value.push({ role: 'ai', text: data.agent_response });
+    // needsApproval.value = data.tool_calls;
     scrollToBottom();
   } catch (error) {
+    isThinking.value = false
     console.error("发送失败:", error);
-    messages.value.push({ role: 'ai', text: '错误: 无法连接到后端服务' });
+    targetMessage.text += '错误: 无法连接到后端服务';
     scrollToBottom();
   }
 };
 
 const resumeMessage = async () => {
   try {
+    isThinking.value = true;
     needsApproval.value = false;
+    const targetMessage = messages.value[aiIndex];
     const res = await fetch('http://localhost:8000/approve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -91,10 +145,49 @@ const resumeMessage = async () => {
         thread_id: threadId.value,
       })
     });
+        
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder('utf-8');
 
-    const data = await res.json();
-    messages.value.push({ role: 'ai', text: data.agent_response });
-    needsApproval.value = data.tool_calls || false;
+    while(true){
+        const { done, value } = await reader.read();
+        if (done) break;
+    
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n\n').filter(line => line.trim() !== '');
+        for (const line of lines) {
+            if (line.startsWith('data: ')) {
+                const dataStr = line.replace('data: ', '').trim();
+                try {
+                    const data = JSON.parse(dataStr);
+                    if (data.type === 'thinking') {
+                        targetMessage.thinking += data.content;
+                        scrollToBottom();
+                    } 
+                    else if (data.type === 'text') {
+                        targetMessage.text += data.content;
+                        isThinking.value = false
+                        needsApproval.value = false;
+                    }
+                    else if (data.type === 'tool_calls') {
+                        isThinking.value = false;
+                        needsApproval.value = true;
+                    }
+                    else if (data.type === 'end') {
+                        isThinking.value = false
+                        needsApproval.value = false;
+                    }
+                } 
+                catch (e) {
+                    console.error("解析数据失败:", e);
+                }
+            }
+        }
+    }
+
+    // const data = await res.json();
+    // messages.value.push({ role: 'ai', text: data.agent_response });
+    // needsApproval.value = data.tool_calls;
     scrollToBottom();
   } catch (error) {
     console.error("批准失败:", error);
@@ -144,6 +237,13 @@ onMounted(() => {
   margin-top: auto; /* 推到底部 */
 }
 
+.thinking-indicator {
+  font-size: 12px;
+  font-style: italic;
+  color: #999;
+  padding: 8px 0;
+}
+
 .message-item {
   display: flex;
   width: 100%;
@@ -182,6 +282,24 @@ onMounted(() => {
 }
 
 .message-text {
+  white-space: pre-wrap;
+}
+
+.message-content {
+  display: inline;
+}
+
+.thinking-text {
+  display: block;
+  font-size: 12px;
+  font-style: italic;
+  color: #888;
+  margin-bottom: 4px;
+}
+
+.response-text {
+  display: block;
+  font-size: 14px;
   white-space: pre-wrap;
 }
 

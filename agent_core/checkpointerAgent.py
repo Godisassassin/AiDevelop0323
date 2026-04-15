@@ -137,6 +137,7 @@ class MyCustomGuardrail(AgentMiddleware):
         return input_data
 # 挂载中间件
 agent = create_agent (
+    # model="claude-3-5-sonnet-20240620",
     model="anthropic:claude-sonnet-4-6",
     tools=tools, 
     middleware=[MyCustomGuardrail()],
