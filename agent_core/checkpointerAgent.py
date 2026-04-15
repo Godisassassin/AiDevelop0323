@@ -8,7 +8,6 @@ load_dotenv()
 
 # 现在可以像获取普通环境变量一样获取它
 api_key = os.getenv("ANTHROPIC_API_KEY")
-print(f"我的密钥是: {api_key}")
 
 from langchain.tools import tool
 
@@ -95,15 +94,16 @@ tools = [fetch_weather, search_database]
 
 from langchain_anthropic import ChatAnthropic
 
-# 确保模型版本支持工具调用
-llm = ChatAnthropic(
-    model="claude-3-5-sonnet-20240620", # 或者使用最新的 "claude-4-sonnet"
-    temperature=0,
-    max_tokens=1024,
-    timeout=None,
-    max_retries=2,
-    # anthropic_api_key="..." # 也可以在这里显式传入
-)
+# # 确保模型版本支持工具调用
+# llm = ChatAnthropic(
+#     model="claude-3-5-sonnet-latest", # 或者使用最新的 "claude-4-sonnet"
+#     # model="MiniMax-M2.7",
+#     temperature=0,
+#     max_tokens=1024,
+#     timeout=None,
+#     max_retries=2,
+#     # anthropic_api_key="..." # 也可以在这里显式传入
+# )
 
 from typing_extensions import TypedDict
 from typing import Annotated, Sequence
@@ -137,7 +137,7 @@ class MyCustomGuardrail(AgentMiddleware):
         return input_data
 # 挂载中间件
 agent = create_agent (
-    llm, 
+    model="anthropic:claude-sonnet-4-6",
     tools=tools, 
     middleware=[MyCustomGuardrail()],
     interrupt_before=["tools"], # 在调用工具前中断，等待人工确认
@@ -145,27 +145,29 @@ agent = create_agent (
     state_schema=AgentState
     )
 
-config = {"configurable": {"thread_id": "user_123"}}
 
-async def run_agent():
-    while True:
-        try:
-            user_input = input("请输入你的问题 (输入 'exit' 退出): ")
-            if user_input.lower() == "exit":
-                print("退出程序。")
+if __name__ == "__main__":
+    config = {"configurable": {"thread_id": "user_123"}}
+
+    async def run_agent():
+        while True:
+            try:
+                user_input = input("请输入你的问题 (输入 'exit' 退出): ")
+                if user_input.lower() == "exit":
+                    print("退出程序。")
+                    break
+                inputs = {"messages": [("user", user_input)]}
+                async for chunk in agent.astream(inputs, config=config):
+                    print(chunk)
+                    if'__interrupt__' in chunk:
+                        confirm = input("🛑 即将执行工具，确认继续? (直接回车确认，输入 'n' 取消): ")
+                        if confirm.lower() == 'n':
+                            print("已取消")
+                            break
+                        async for chunk in agent.astream(Command(resume=confirm), config=config):
+                            print(chunk)
+                        state = agent.get_state(config)
+            except (EOFError, KeyboardInterrupt):
+                print("\n再见！")
                 break
-            inputs = {"messages": [("user", user_input)]}
-            async for chunk in agent.astream(inputs, config=config):
-                print(chunk)
-                if'__interrupt__' in chunk:
-                    confirm = input("🛑 即将执行工具，确认继续? (直接回车确认，输入 'n' 取消): ")
-                    if confirm.lower() == 'n':
-                        print("已取消")
-                        break
-                    async for chunk in agent.astream(Command(resume=confirm), config=config):
-                        print(chunk)
-                    state = agent.get_state(config)
-        except (EOFError, KeyboardInterrupt):
-            print("\n再见！")
-            break
-
+    asyncio.run(run_agent())
