@@ -16,7 +16,6 @@ coverage
 
 # Editor directories and files
 .vscode/*
-!.vscode/extensions.json
 .idea
 *.suo
 *.ntvs*
@@ -27,6 +26,7 @@ coverage
 *.tsbuildinfo
 
 .eslintcache
+pnpm-lock.yaml
 
 # Cypress
 /cypress/videos/
