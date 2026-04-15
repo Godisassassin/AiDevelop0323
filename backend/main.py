@@ -1,11 +1,14 @@
 import os
 import sys
 import asyncio
+import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from fastapi import FastAPI,HTTPException
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List,Optional
+from typing import List,Optional,Any
 from sqlmodel import SQLModel,Session, Field, create_engine, select
 from contextlib import asynccontextmanager
 
@@ -17,6 +20,14 @@ async def lifespan(app: FastAPI):
 
 # 初始化应用
 app = FastAPI(title="My Agent API",lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"], 
+    allow_credentials=True,
+    allow_methods=["*"],  # 确保包含 "OPTIONS" 和 "POST"
+    allow_headers=["*"],
+)
 
 # 定义数据模型（模拟前端发来的数据格式）
 class ChatRequest(BaseModel):
@@ -33,6 +44,7 @@ class ChatRecord(SQLModel, table=True):
     user_query: str
     # agent_thinking: str
     agent_response: str
+    tool_calls : bool
 
 # 数据库连接设置
 sqlite_file_name = "database.db"
@@ -54,68 +66,65 @@ from langchain_core.messages import AIMessage
 async def chat(request_in: ChatRequest):
     config = {"configurable": {"thread_id": f"{request_in.thread_id}"}}
     try:     
-        # current_state = await agent.aget_state(config)
-        # messages = current_state.values.get("messages", []) 
+        async def event_generator():
+            async for event in agent.astream_events(
+                {"messages": [("user", request_in.user_query)]}, 
+                config, 
+                version="v2"
+            ):
+                kind = event.get("event")
 
-        # # 将ai回复的数据清洗成简单格式  
-        # fixed_messages = []    
-        # for msg in messages:
-        #     if isinstance(msg, AIMessage) and isinstance(msg.content, list):
-        #         # 只提取 text 部分，完全丢弃 thinking 块
-        #         clean_text = "".join(
-        #             block.get("text", "") 
-        #             for block in msg.content 
-        #             if block.get("type") == "text"
-        #         )
-        #         fixed_messages.append(AIMessage(content=clean_text))
-        #     else:
-        #         fixed_messages.append(msg)
-        
-        # if fixed_messages:
-        #     await agent.aupdate_state(config, {"messages": fixed_messages})
-        # # 清洗完成，继续正常调用 Agent
-   
-        response = await agent.ainvoke(
-            {"messages": [("user", request_in.user_query)]}, 
-            config=config)
-        print("--- Agent 调用成功 ---")
+                if kind == "agent_thought":
+                    thinking = event.get("thinking", "")
+                    yield f"data: {thinking}\n\n"
+                elif kind == "on_chat_model_stream":
+                    content = event["data"]["chunk"].content
+                    if content:
+                    # SSE 格式要求以 "data: " 开头，以 "\n\n" 结尾
+                        yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+                elif kind == "on_chain_end" and event["name"] == "LangGraph":
+                    yield f"data: {json.dumps({'type': 'end'})}\n\n"
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+    except Exception as e:
+        print(f"❌ 后端报错详情: {str(e)}")
+        # 将错误返回给前端，方便调试
+        return {"detail": f"Error inside chat: {str(e)}"}
 
+@app.post("/approve")
+async def approve_tool(request: ApproveRequest):
+    try:
+        config = {"configurable": {"thread_id": request.thread_id}}
+        # 传入 None 表示继续执行中断后的逻辑
+        response = await agent.astream(Command(resume={"confirm": request.confirm}),  config=config)
+    
         state = await agent.aget_state(config)
         messages = state.values.get("messages", [])
-        print(f"当前状态信息: {messages}")
-        if messages:   
-            # 这种方式比 hasattr 更安全
-            t_calls = getattr(messages[-1], "tool_calls", None)
-            if t_calls:
-                print(f"检测到工具调用: {t_calls}")
-
-
-        if "messages" in response:
-            agent_response_content =response["messages"][-1].content
-            agent_response_texts = [block['text'] for block in agent_response_content if block.get('type') == 'text']
-            # agent_response_thinkings = [block['thinking'] for block in agent_response_content if block.get('type') == 'thinking']
+        agent_response = datahandler(response)
 
         with Session(engine) as session:
             record = ChatRecord(
-                user_query=request_in.user_query,
-                # agent_thinking=str(agent_response_thinkings),
-                agent_response=str(agent_response_texts)
-            )
-            session.add(record)
-            session.commit()
-            session.refresh(record)
-    except Exception as e:
+            user_query=f"Tool approval: {request.confirm}",
+            # agent_thinking=str(agent_response_thinkings),
+            agent_response=agent_response,
+            tool_calls=False
+        )
+        session.add(record)
+        session.commit()
+        session.refresh(record)  
+    except Exception as e:       
         print(f"❌ 后端报错详情: {str(e)}")
         # 将错误返回给前端，方便调试
         return {"detail": f"Error inside chat: {str(e)}"}
     return record
 
-@app.post("/approve")
-async def approve_tool(request: ApproveRequest):
-    config = {"configurable": {"thread_id": request.thread_id}}
-    # 传入 None 表示继续执行中断后的逻辑
-    result = await agent.ainvoke(Command(resume={"confirm": request.confirm}),  config=config)
-    return result
+def datahandler(data:dict[str,Any]|Any)->str:
+    if "messages" in data:
+        agent_response_content =data["messages"][-1].content
+        agent_response_texts = [block['text'] for block in agent_response_content if block.get('type') == 'text']
+        # agent_response_thinkings = [block['thinking'] for block in agent_response_content if block.get('type') == 'thinking']
+        return ' '.join(agent_response_texts)
+    return ""        
+    
 
 # 获取历史记录接口
 @app.get("/history",response_model=List[ChatRecord])

@@ -1,2 +1,5 @@
 __pycache__
 .env
+backend/__pycache__
+backend/database.db
+agent_core/__pycache__
